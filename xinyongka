@@ -417,18 +417,20 @@ function largeWidget(cards, pick) {
 
 export default async function(ctx) {
   const now = new Date();
-  const nj = nanjingPurchase(now);
-  const bocom = bocomPurchase(now);
   
   const cards = [
+    // 仅保留的 6 个银行
     { name: '工商银行', shortName: '工行', tail: '0001', data: sameMonthFixedDuePurchase(now, 1, 25) },
     { name: '广发银行', shortName: '广发', tail: '8888', data: nextMonthFixedDuePurchase(now, 13, 2) },
     { name: '兴业银行', shortName: '兴业', tail: '9226', data: sameMonthFixedDuePurchase(now, 3, 23) },
     { name: '招商银行', shortName: '招商', tail: '8209', data: sameMonthFixedDuePurchase(now, 8, 26) },
     { name: '民生银行', shortName: '民生', tail: '2826', data: nextMonthFixedDuePurchase(now, 25, 14) },
     { name: '中信银行', shortName: '中信', tail: '6165', data: nextMonthFixedDuePurchase(now, 14, 3) },
-    { name: '南京银行', shortName: '南京', tail: '7809', data: nj },
-    { name: '交通银行', shortName: '交行', tail: '3324', data: bocom },
+    
+    // 其余银行已注释不生效
+    /*
+    { name: '南京银行', shortName: '南京', tail: '7809', data: nanjingPurchase(now) },
+    { name: '交通银行', shortName: '交行', tail: '3324', data: bocomPurchase(now) },
     { name: '平安银行', shortName: '平安', tail: '3218', data: nextMonthFixedDuePurchase(now, 24, 12) },
     { name: '浦发银行', shortName: '浦发', tail: '9723', data: offsetPurchase(now, 28, 20) },
     { name: '农业银行', shortName: '农行', tail: '2975', data: offsetPurchase(now, 16, 19) },
@@ -436,6 +438,7 @@ export default async function(ctx) {
     { name: '浙商银行', shortName: '浙商', tail: '0611', data: sameMonthFixedDuePurchase(now, 1, 18) },
     { name: '中国银行', shortName: '中行', tail: '1228', data: offsetPurchase(now, 22, 20) },
     { name: '江苏银行', shortName: '江苏', tail: '1349', data: offsetPurchase(now, 20, 20) },
+    */
   ].sort((a, b) => b.data.days - a.data.days || a.name.localeCompare(b.name, 'zh-CN'));
   
   const pick = recommendation(cards);
