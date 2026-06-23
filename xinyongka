@@ -1,0 +1,466 @@
+const C = {
+  bg: { light: '#FFFFFF', dark: '#0B0B0D' },
+  card: { light: '#FFFFFF', dark: '#1C1C1E' },
+  text: { light: '#111114', dark: '#F5F5F7' },
+  sub: { light: '#6E6E73', dark: '#A1A1A6' },
+  line: { light: '#E5E5EA', dark: '#343438' },
+  panel: { light: '#F5F5F5', dark: '#202124' },
+  accent: { light: '#00C805', dark: '#C3F53C' },
+  nj: { light: '#111114', dark: '#F5F5F7' },
+  cmb: { light: '#111114', dark: '#F5F5F7' },
+  good: { light: '#008A3B', dark: '#C3F53C' },
+};
+
+const pad = (n) => String(n).padStart(2, '0');
+const dayMs = 24 * 60 * 60 * 1000;
+
+function localDay(date) {
+  return new Date(date.getFullYear(), date.getMonth(), date.getDate());
+}
+
+function addDays(date, days) {
+  const result = new Date(date);
+  result.setDate(result.getDate() + days);
+  return result;
+}
+
+function daysInclusive(from, to) {
+  return Math.floor((localDay(to) - localDay(from)) / dayMs) + 1;
+}
+
+function dateLabel(date) {
+  return `${pad(date.getMonth() + 1)}月${pad(date.getDate())}日`;
+}
+
+// 南京银行：12日消费计入当期账单，到期日为账单日后第25天。
+function nanjingPurchase(now) {
+  const statementMonth = now.getDate() <= 12
+    ?
+    now.getMonth()
+    : now.getMonth() + 1;
+  const statement = new Date(now.getFullYear(), statementMonth, 12);
+  const due = addDays(statement, 25);
+  return { statement, due, days: daysInclusive(now, due) };
+}
+
+// 招商银行：按18日当天计入当期账单的保守口径计算，固定次月6日还款。
+function cmbPurchase(now) {
+  const statementMonth = now.getDate() <= 18
+    ?
+    now.getMonth()
+    : now.getMonth() + 1;
+  const statement = new Date(now.getFullYear(), statementMonth, 18);
+  const due = new Date(statement.getFullYear(), statement.getMonth() + 1, 6);
+  return { statement, due, days: daysInclusive(now, due) };
+}
+
+function offsetPurchase(now, statementDay, offsetDays) {
+  const statementMonth = now.getDate() <= statementDay
+    ?
+    now.getMonth()
+    : now.getMonth() + 1;
+  const statement = new Date(now.getFullYear(), statementMonth, statementDay);
+  const due = addDays(statement, offsetDays);
+  return { statement, due, days: daysInclusive(now, due) };
+}
+
+function nextMonthFixedDuePurchase(now, statementDay, dueDay) {
+  const statementMonth = now.getDate() <= statementDay
+    ?
+    now.getMonth()
+    : now.getMonth() + 1;
+  const statement = new Date(now.getFullYear(), statementMonth, statementDay);
+  const due = new Date(statement.getFullYear(), statement.getMonth() + 1, dueDay);
+  return { statement, due, days: daysInclusive(now, due) };
+}
+
+function sameMonthFixedDuePurchase(now, statementDay, dueDay) {
+  const statementMonth = now.getDate() <= statementDay
+    ?
+    now.getMonth()
+    : now.getMonth() + 1;
+  const statement = new Date(now.getFullYear(), statementMonth, statementDay);
+  const due = new Date(statement.getFullYear(), statement.getMonth(), dueDay);
+  return { statement, due, days: daysInclusive(now, due) };
+}
+
+// 兴业银行：26日出账，到期日为账单日后第20天。
+function industrialPurchase(now) {
+  const statementMonth = now.getDate() <= 26
+    ?
+    now.getMonth()
+    : now.getMonth() + 1;
+  const statement = new Date(now.getFullYear(), statementMonth, 26);
+  const due = addDays(statement, 20);
+  return { statement, due, days: daysInclusive(now, due) };
+}
+
+// 交通银行：27日出账，固定次月21日还款。
+function bocomPurchase(now) {
+  const statementMonth = now.getDate() <= 27
+    ?
+    now.getMonth()
+    : now.getMonth() + 1;
+  const statement = new Date(now.getFullYear(), statementMonth, 27);
+  const due = new Date(statement.getFullYear(), statement.getMonth() + 1, 21);
+  return { statement, due, days: daysInclusive(now, due) };
+}
+
+function txt(value, size, weight = 'regular', color = C.text, extra = {}) {
+  return {
+    type: 'text',
+    text: String(value),
+    font: { size, weight },
+    textColor: color,
+    maxLines: 1,
+    minScale: 0.65,
+    ...extra,
+  };
+}
+
+function mono(value, size, weight = 'regular', color = C.text, extra = {}) {
+  return txt(value, size, weight, color, {
+    ...extra,
+    font: { size, weight, family: 'Menlo' },
+  });
+}
+
+function icon(name, color, size = 16) {
+  return {
+    type: 'image',
+    src: `sf-symbol:${name}`,
+    color,
+    width: size,
+    height: size,
+  };
+}
+
+function recommendation(cards) {
+  const maxDays = Math.max(...cards.map((card) => card.data.days));
+  const winners = cards.filter((card) => card.data.days === maxDays);
+  const lowerDays = cards
+    .filter((card) => card.data.days < maxDays)
+    .map((card) => card.data.days);
+  const nextBest = lowerDays.length ? Math.max(...lowerDays) : maxDays;
+
+  if (winners.length === cards.length) {
+    return {
+      title: '今天所有卡一样划算',
+      detail: `免息期均为${maxDays}天`,
+      color: C.good,
+      days: maxDays,
+    };
+  }
+
+  const labelPriority = { '招商银行': 0, '南京银行': 1 };
+  const names = [...winners]
+    .sort((a, b) => (labelPriority[a.name] ?? 10) - (labelPriority[b.name] ?? 10))
+    .map((card) => card.name)
+    .join('与');
+  return {
+    title: `优先刷${names}`,
+    detail: winners.length > 1
+      ?
+      `并列最长${maxDays}天`
+      : `免息期多${maxDays - nextBest}天`,
+    color: C.good,
+    days: maxDays,
+  };
+}
+
+function bankCard(name, tail, data, color, compact = false) {
+  return {
+    type: 'stack',
+    direction: 'column',
+    flex: 1,
+    gap: compact ?
+    6 : 8,
+    padding: compact ? 11 : 14,
+    backgroundColor: C.card,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: C.line,
+    children: [
+      {
+        type: 'stack',
+        direction: 'row',
+        alignItems: 'center',
+        gap: 6,
+        children: [
+          icon('creditcard.fill', color, compact 
+          ? 14 : 17),
+          txt(name, compact ? 12 : 15, 'bold'),
+          { type: 'spacer' },
+          txt(`••${tail}`, 10, 'medium', C.sub),
+        ],
+      },
+      {
+        type: 'stack',
+        direction: 'row',
+        alignItems: 'end',
+        children: [
+          txt(data.days, compact ? 27 : 34, 'bold', color),
+          txt('天', compact ? 12 : 14, 'semibold', color),
+          { type: 'spacer' },
+          txt(`${dateLabel(data.due)}还`, 10, 'semibold', C.sub),
+        ],
+      },
+      ...(compact ? [] : [
+        { type: 'stack', height: 1, backgroundColor: C.line 
+        },
+        {
+          type: 'stack',
+          direction: 'row',
+          children: [
+            txt('本次消费出账', 11, 'regular', C.sub),
+            { type: 'spacer' },
+            txt(dateLabel(data.statement), 11, 'semibold'),
+          ],
+        },
+      ]),
+    ],
+  };
+}
+
+function smallWidget(cards, pick) {
+  const first = cards[0];
+  const second = cards[1];
+  const third = cards[2];
+  return {
+    type: 'widget',
+    padding: 14,
+    gap: 8,
+    backgroundColor: C.bg,
+    children: [
+      txt('今日刷卡', 13, 'bold'),
+      txt(pick.title.replace('今天', ''), 16, 'bold', pick.color),
+      txt(pick.detail, 11, 'medium', C.sub),
+      { type: 'spacer' },
+      {
+        type: 'stack',
+        direction: 'row',
+        children: [
+          txt(`${first.shortName} ${first.data.days}天`, 11, 'semibold'),
+          { type: 'spacer' },
+          txt(`${second.shortName} ${second.data.days}天`, 11, 'semibold'),
+        ],
+      },
+      {
+        type: 'stack',
+        direction: 'row',
+        children: [
+          txt(`第3名 ${third.shortName}`, 10, 'medium', C.sub),
+          { type: 'spacer' },
+          txt(`${third.data.days}天`, 10, 'semibold'),
+        ],
+      },
+    ],
+  };
+}
+
+function mediumWidget(cards, pick) {
+  const metricCell = (card) => {
+    const isRecommended = card.data.days === pick.days;
+    return {
+      type: 'stack',
+      direction: 'column',
+      flex: 1,
+      gap: 4,
+      padding: 8,
+      backgroundColor: isRecommended
+        ?
+        { light: '#F0FFF5', dark: '#142219' }
+        : C.panel,
+      borderRadius: 6,
+      borderWidth: 1,
+      borderColor: isRecommended ?
+      C.accent : { light: '#00000000', dark: '#00000000' },
+      children: [
+        {
+          type: 'stack',
+          direction: 'row',
+          alignItems: 'center',
+          children: [
+            txt(card.name, 9, 'semibold', isRecommended ? C.text : C.sub),
+            mono(` ${card.tail}`, 8, 
+            'medium', C.sub),
+            { type: 'spacer' },
+            ...(isRecommended ? [{
+              type: 'stack',
+              padding: [2, 4],
+              backgroundColor: C.accent,
+              borderRadius: 4,
+              children: [
+                txt('推荐', 7, 'bold', { light: '#FFFFFF', dark: '#071108' }),
+              ],
+            }] : []),
+          ],
+        },
+        {
+          type: 'stack',
+          direction: 'row',
+          alignItems: 'end',
+          children: [
+            mono(card.data.days, 20, 'bold', isRecommended ? C.good : C.text),
+            txt('天', 8, 'semibold', isRecommended ? C.good : C.sub),
+            { type: 'spacer' },
+            mono(dateLabel(card.data.due), 8, 'medium', C.sub),
+          ],
+        },
+      ],
+    };
+  };
+
+  const topCards = cards.slice(0, 3);
+
+  return {
+    type: 'widget',
+    padding: 16,
+    gap: 9,
+    backgroundColor: C.bg,
+    children: [
+      {
+        type: 'stack',
+        direction: 'row',
+        alignItems: 'center',
+        children: [
+          txt('今日刷卡建议', 11, 'bold'),
+          { type: 'spacer' },
+          txt('按免息期排序 · 前3名', 9, 'medium', C.sub),
+        ],
+      },
+      {
+        type: 'stack',
+        direction: 'row',
+        alignItems: 'center',
+        children: [
+          icon('checkmark.circle.fill', C.accent, 16),
+          { type: 'spacer', length: 7 },
+          txt(pick.title.replace('今天', ''), 18, 'bold'),
+        ],
+      },
+      {
+        type: 'stack',
+        direction: 'row',
+        gap: 6,
+        children: topCards.map(metricCell),
+      },
+    ],
+  };
+}
+
+function largeWidget(cards, pick) {
+  const metricCell = (card) => ({
+    type: 'stack',
+    direction: 'column',
+    flex: 1,
+    gap: 2,
+    padding: [6, 8],
+    backgroundColor: C.panel,
+    borderRadius: 6,
+    children: [
+      {
+        type: 'stack',
+        direction: 'row',
+        alignItems: 'center',
+        children: [
+          txt(card.name, 10, 'semibold'),
+          txt(` ${card.tail}`, 8, 'medium', C.sub),
+          { type: 'spacer' },
+          txt(card.data.days, 18, 'bold'),
+          txt('天', 8, 'bold', C.accent),
+        ],
+      },
+      txt(`${dateLabel(card.data.statement)}出账 · ${dateLabel(card.data.due)}还`, 8, 'medium', C.sub),
+    ],
+  });
+  const rows = [];
+  for (let index = 0; index < cards.length; index += 2) {
+    const pair = cards.slice(index, index + 2);
+    const children = pair.map(metricCell);
+    if (children.length === 1) {
+      children.push({ type: 'stack', flex: 1, children: [] });
+    }
+    rows.push({
+      type: 'stack',
+      direction: 'row',
+      gap: 6,
+      children,
+    });
+  }
+
+  return {
+    type: 'widget',
+    padding: 13,
+    gap: 6,
+    backgroundColor: C.bg,
+    children: [
+      {
+        type: 'stack', direction: 'row', alignItems: 'end',
+        children: [
+          {
+            type: 'stack', direction: 'column', gap: 1,
+            children: [
+              txt(pick.title, 16, 'bold', pick.color),
+              txt('按今天消费的实际免息期排序', 8, 'medium', C.sub),
+            ],
+          },
+          { type: 'spacer' },
+          txt(pick.days, 27, 'bold'),
+          txt('DAYS', 8, 'bold', C.accent),
+        ],
+      },
+      ...rows,
+    ],
+  };
+}
+
+export default async function(ctx) {
+  const now = new Date();
+  const nj = nanjingPurchase(now);
+  const bocom = bocomPurchase(now);
+  
+  const cards = [
+    { name: '工商银行', shortName: '工行', tail: '0001', data: sameMonthFixedDuePurchase(now, 1, 25) },
+    { name: '广发银行', shortName: '广发', tail: '8888', data: nextMonthFixedDuePurchase(now, 13, 2) },
+    { name: '兴业银行', shortName: '兴业', tail: '9226', data: sameMonthFixedDuePurchase(now, 3, 23) },
+    { name: '招商银行', shortName: '招商', tail: '8209', data: sameMonthFixedDuePurchase(now, 8, 26) },
+    { name: '民生银行', shortName: '民生', tail: '2826', data: nextMonthFixedDuePurchase(now, 25, 14) },
+    { name: '中信银行', shortName: '中信', tail: '6165', data: nextMonthFixedDuePurchase(now, 14, 3) },
+    { name: '南京银行', shortName: '南京', tail: '7809', data: nj },
+    { name: '交通银行', shortName: '交行', tail: '3324', data: bocom },
+    { name: '平安银行', shortName: '平安', tail: '3218', data: nextMonthFixedDuePurchase(now, 24, 12) },
+    { name: '浦发银行', shortName: '浦发', tail: '9723', data: offsetPurchase(now, 28, 20) },
+    { name: '农业银行', shortName: '农行', tail: '2975', data: offsetPurchase(now, 16, 19) },
+    { name: '邮储银行', shortName: '邮储', tail: '8508', data: offsetPurchase(now, 6, 20) },
+    { name: '浙商银行', shortName: '浙商', tail: '0611', data: sameMonthFixedDuePurchase(now, 1, 18) },
+    { name: '中国银行', shortName: '中行', tail: '1228', data: offsetPurchase(now, 22, 20) },
+    { name: '江苏银行', shortName: '江苏', tail: '1349', data: offsetPurchase(now, 20, 20) },
+  ].sort((a, b) => b.data.days - a.data.days || a.name.localeCompare(b.name, 'zh-CN'));
+  
+  const pick = recommendation(cards);
+  const topCards = cards.slice(0, 3);
+  
+  if (ctx.widgetFamily === 'accessoryInline') {
+    return {
+      type: 'widget',
+      children: [txt(`${pick.title} · ${pick.detail}`, 12, 'semibold')],
+    };
+  }
+
+  if (ctx.widgetFamily === 'accessoryRectangular') {
+    return {
+      type: 'widget',
+      padding: 8,
+      gap: 3,
+      children: [
+        txt(pick.title, 12, 'bold'),
+        txt(topCards.map((card) => `${card.shortName}${card.data.days}天`).join(' · '), 9, 'medium'),
+      ],
+    };
+  }
+
+  if (ctx.widgetFamily === 'systemSmall') return smallWidget(topCards, pick);
+  if (ctx.widgetFamily === 'systemMedium') return mediumWidget(topCards, pick);
+  return largeWidget(topCards, pick);
+}
