@@ -9,7 +9,12 @@ const C = {
   nj: { light: '#111114', dark: '#F5F5F7' },
   cmb: { light: '#111114', dark: '#F5F5F7' },
   good: { light: '#008A3B', dark: '#C3F53C' },
+  warn: { light: '#FF9500', dark: '#FFB340' },
+  danger: { light: '#D63A2E', dark: '#FF6A5F' },
 };
+
+// 临期提醒阈值（天）：还款日距今 <= 此值时视为"快到还款日"
+const DUE_SOON_THRESHOLD = 7;
 
 const pad = (n) => String(n).padStart(2, '0');
 const dayMs = 24 * 60 * 60 * 1000;
@@ -28,16 +33,18 @@ function daysInclusive(from, to) {
   return Math.floor((localDay(to) - localDay(from)) / dayMs) + 1;
 }
 
+// 距还款日的剩余天数（用于"临期提醒"排序，不是免息期天数）
+function daysUntilDue(now, due) {
+  return Math.floor((localDay(due) - localDay(now)) / dayMs);
+}
+
 function dateLabel(date) {
   return `${pad(date.getMonth() + 1)}月${pad(date.getDate())}日`;
 }
 
 // 南京银行：12日消费计入当期账单，到期日为账单日后第25天。
 function nanjingPurchase(now) {
-  const statementMonth = now.getDate() <= 12
-    ?
-    now.getMonth()
-    : now.getMonth() + 1;
+  const statementMonth = now.getDate() <= 12 ? now.getMonth() : now.getMonth() + 1;
   const statement = new Date(now.getFullYear(), statementMonth, 12);
   const due = addDays(statement, 25);
   return { statement, due, days: daysInclusive(now, due) };
@@ -45,40 +52,28 @@ function nanjingPurchase(now) {
 
 // 招商银行：按18日当天计入当期账单的保守口径计算，固定次月6日还款。
 function cmbPurchase(now) {
-  const statementMonth = now.getDate() <= 18
-    ?
-    now.getMonth()
-    : now.getMonth() + 1;
+  const statementMonth = now.getDate() <= 18 ? now.getMonth() : now.getMonth() + 1;
   const statement = new Date(now.getFullYear(), statementMonth, 18);
   const due = new Date(statement.getFullYear(), statement.getMonth() + 1, 6);
   return { statement, due, days: daysInclusive(now, due) };
 }
 
 function offsetPurchase(now, statementDay, offsetDays) {
-  const statementMonth = now.getDate() <= statementDay
-    ?
-    now.getMonth()
-    : now.getMonth() + 1;
+  const statementMonth = now.getDate() <= statementDay ? now.getMonth() : now.getMonth() + 1;
   const statement = new Date(now.getFullYear(), statementMonth, statementDay);
   const due = addDays(statement, offsetDays);
   return { statement, due, days: daysInclusive(now, due) };
 }
 
 function nextMonthFixedDuePurchase(now, statementDay, dueDay) {
-  const statementMonth = now.getDate() <= statementDay
-    ?
-    now.getMonth()
-    : now.getMonth() + 1;
+  const statementMonth = now.getDate() <= statementDay ? now.getMonth() : now.getMonth() + 1;
   const statement = new Date(now.getFullYear(), statementMonth, statementDay);
   const due = new Date(statement.getFullYear(), statement.getMonth() + 1, dueDay);
   return { statement, due, days: daysInclusive(now, due) };
 }
 
 function sameMonthFixedDuePurchase(now, statementDay, dueDay) {
-  const statementMonth = now.getDate() <= statementDay
-    ?
-    now.getMonth()
-    : now.getMonth() + 1;
+  const statementMonth = now.getDate() <= statementDay ? now.getMonth() : now.getMonth() + 1;
   const statement = new Date(now.getFullYear(), statementMonth, statementDay);
   const due = new Date(statement.getFullYear(), statement.getMonth(), dueDay);
   return { statement, due, days: daysInclusive(now, due) };
@@ -86,10 +81,7 @@ function sameMonthFixedDuePurchase(now, statementDay, dueDay) {
 
 // 兴业银行：26日出账，到期日为账单日后第20天。
 function industrialPurchase(now) {
-  const statementMonth = now.getDate() <= 26
-    ?
-    now.getMonth()
-    : now.getMonth() + 1;
+  const statementMonth = now.getDate() <= 26 ? now.getMonth() : now.getMonth() + 1;
   const statement = new Date(now.getFullYear(), statementMonth, 26);
   const due = addDays(statement, 20);
   return { statement, due, days: daysInclusive(now, due) };
@@ -97,10 +89,7 @@ function industrialPurchase(now) {
 
 // 交通银行：27日出账，固定次月21日还款。
 function bocomPurchase(now) {
-  const statementMonth = now.getDate() <= 27
-    ?
-    now.getMonth()
-    : now.getMonth() + 1;
+  const statementMonth = now.getDate() <= 27 ? now.getMonth() : now.getMonth() + 1;
   const statement = new Date(now.getFullYear(), statementMonth, 27);
   const due = new Date(statement.getFullYear(), statement.getMonth() + 1, 21);
   return { statement, due, days: daysInclusive(now, due) };
@@ -152,20 +141,29 @@ function recommendation(cards) {
     };
   }
 
-  const labelPriority = { '招商银行': 0, '南京银行': 1 };
-  const names = [...winners]
-    .sort((a, b) => (labelPriority[a.name] ?? 10) - (labelPriority[b.name] ?? 10))
-    .map((card) => card.name)
-    .join('与');
+  const names = winners.map((card) => card.name).join('与');
   return {
     title: `优先刷${names}`,
     detail: winners.length > 1
-      ?
-      `并列最长${maxDays}天`
+      ? `并列最长${maxDays}天`
       : `免息期多${maxDays - nextBest}天`,
     color: C.good,
     days: maxDays,
   };
+}
+
+// 找出即将到期（剩余天数 <= 阈值）的卡，按剩余天数从小到大排序
+function dueSoonCards(cards, now) {
+  return cards
+    .map((card) => ({ ...card, remaining: daysUntilDue(now, card.data.due) }))
+    .filter((card) => card.remaining <= DUE_SOON_THRESHOLD)
+    .sort((a, b) => a.remaining - b.remaining);
+}
+
+function dueSoonColor(remaining) {
+  if (remaining <= 1) return C.danger;
+  if (remaining <= 3) return C.warn;
+  return C.good;
 }
 
 function bankCard(name, tail, data, color, compact = false) {
@@ -173,8 +171,7 @@ function bankCard(name, tail, data, color, compact = false) {
     type: 'stack',
     direction: 'column',
     flex: 1,
-    gap: compact ?
-    6 : 8,
+    gap: compact ? 6 : 8,
     padding: compact ? 11 : 14,
     backgroundColor: C.card,
     borderRadius: 8,
@@ -187,8 +184,7 @@ function bankCard(name, tail, data, color, compact = false) {
         alignItems: 'center',
         gap: 6,
         children: [
-          icon('creditcard.fill', color, compact 
-          ? 14 : 17),
+          icon('creditcard.fill', color, compact ? 14 : 17),
           txt(name, compact ? 12 : 15, 'bold'),
           { type: 'spacer' },
           txt(`••${tail}`, 10, 'medium', C.sub),
@@ -206,8 +202,7 @@ function bankCard(name, tail, data, color, compact = false) {
         ],
       },
       ...(compact ? [] : [
-        { type: 'stack', height: 1, backgroundColor: C.line 
-        },
+        { type: 'stack', height: 1, backgroundColor: C.line },
         {
           type: 'stack',
           direction: 'row',
@@ -222,10 +217,11 @@ function bankCard(name, tail, data, color, compact = false) {
   };
 }
 
-function smallWidget(cards, pick) {
+function smallWidget(cards, pick, now) {
   const first = cards[0];
   const second = cards[1];
   const third = cards[2];
+  const urgent = dueSoonCards(cards, now)[0];
   return {
     type: 'widget',
     padding: 14,
@@ -235,6 +231,21 @@ function smallWidget(cards, pick) {
       txt('今日刷卡', 13, 'bold'),
       txt(pick.title.replace('今天', ''), 16, 'bold', pick.color),
       txt(pick.detail, 11, 'medium', C.sub),
+      ...(urgent ? [
+        {
+          type: 'stack',
+          direction: 'row',
+          alignItems: 'center',
+          gap: 4,
+          children: [
+            icon('exclamationmark.triangle.fill', dueSoonColor(urgent.remaining), 11),
+            txt(
+              `${urgent.shortName} ${urgent.remaining <= 0 ? '今天到期' : `${urgent.remaining}天后到期`}`,
+              10, 'semibold', dueSoonColor(urgent.remaining)
+            ),
+          ],
+        },
+      ] : []),
       { type: 'spacer' },
       {
         type: 'stack',
@@ -258,7 +269,7 @@ function smallWidget(cards, pick) {
   };
 }
 
-function mediumWidget(cards, pick) {
+function mediumWidget(allCards, topCards, pick, now) {
   const metricCell = (card) => {
     const isRecommended = card.data.days === pick.days;
     return {
@@ -268,13 +279,11 @@ function mediumWidget(cards, pick) {
       gap: 4,
       padding: 8,
       backgroundColor: isRecommended
-        ?
-        { light: '#F0FFF5', dark: '#142219' }
+        ? { light: '#F0FFF5', dark: '#142219' }
         : C.panel,
       borderRadius: 6,
       borderWidth: 1,
-      borderColor: isRecommended ?
-      C.accent : { light: '#00000000', dark: '#00000000' },
+      borderColor: isRecommended ? C.accent : { light: '#00000000', dark: '#00000000' },
       children: [
         {
           type: 'stack',
@@ -282,8 +291,7 @@ function mediumWidget(cards, pick) {
           alignItems: 'center',
           children: [
             txt(card.name, 9, 'semibold', isRecommended ? C.text : C.sub),
-            mono(` ${card.tail}`, 8, 
-            'medium', C.sub),
+            mono(` ${card.tail}`, 8, 'medium', C.sub),
             { type: 'spacer' },
             ...(isRecommended ? [{
               type: 'stack',
@@ -311,7 +319,7 @@ function mediumWidget(cards, pick) {
     };
   };
 
-  const topCards = cards.slice(0, 3);
+  const urgent = dueSoonCards(allCards, now)[0];
 
   return {
     type: 'widget',
@@ -345,38 +353,78 @@ function mediumWidget(cards, pick) {
         gap: 6,
         children: topCards.map(metricCell),
       },
+      ...(urgent ? [
+        {
+          type: 'stack',
+          direction: 'row',
+          alignItems: 'center',
+          gap: 4,
+          children: [
+            icon('exclamationmark.triangle.fill', dueSoonColor(urgent.remaining), 11),
+            txt(
+              `提醒：${urgent.name} ${urgent.remaining <= 0 ? '今天就要还款' : `${urgent.remaining}天后还款`}`,
+              10, 'semibold', dueSoonColor(urgent.remaining)
+            ),
+          ],
+        },
+      ] : []),
     ],
   };
 }
 
-function largeWidget(cards, pick) {
-  const metricCell = (card) => ({
-    type: 'stack',
-    direction: 'column',
-    flex: 1,
-    gap: 2,
-    padding: [6, 8],
-    backgroundColor: C.panel,
-    borderRadius: 6,
-    children: [
-      {
-        type: 'stack',
-        direction: 'row',
-        alignItems: 'center',
-        children: [
-          txt(card.name, 10, 'semibold'),
-          txt(` ${card.tail}`, 8, 'medium', C.sub),
-          { type: 'spacer' },
-          txt(card.data.days, 18, 'bold'),
-          txt('天', 8, 'bold', C.accent),
-        ],
-      },
-      txt(`${dateLabel(card.data.statement)}出账 · ${dateLabel(card.data.due)}还`, 8, 'medium', C.sub),
-    ],
-  });
+function largeWidget(allCards, pick, now) {
+  const metricCell = (card) => {
+    const remaining = daysUntilDue(now, card.data.due);
+    const isUrgent = remaining <= DUE_SOON_THRESHOLD;
+    return {
+      type: 'stack',
+      direction: 'column',
+      flex: 1,
+      gap: 2,
+      padding: [6, 8],
+      backgroundColor: isUrgent
+        ? { light: '#FFF6EC', dark: '#241B0E' }
+        : C.panel,
+      borderRadius: 6,
+      borderWidth: isUrgent ? 1 : 0,
+      borderColor: isUrgent ? dueSoonColor(remaining) : { light: '#00000000', dark: '#00000000' },
+      children: [
+        {
+          type: 'stack',
+          direction: 'row',
+          alignItems: 'center',
+          children: [
+            txt(card.name, 10, 'semibold'),
+            txt(` ${card.tail}`, 8, 'medium', C.sub),
+            { type: 'spacer' },
+            txt(card.data.days, 18, 'bold'),
+            txt('天', 8, 'bold', C.accent),
+          ],
+        },
+        {
+          type: 'stack',
+          direction: 'row',
+          alignItems: 'center',
+          children: [
+            txt(`${dateLabel(card.data.statement)}出账 · ${dateLabel(card.data.due)}还`, 8, 'medium', C.sub),
+            { type: 'spacer' },
+            ...(isUrgent ? [
+              icon('exclamationmark.triangle.fill', dueSoonColor(remaining), 9),
+              txt(
+                remaining <= 0 ? ' 今天到期' : ` ${remaining}天后到期`,
+                8, 'bold', dueSoonColor(remaining)
+              ),
+            ] : []),
+          ],
+        },
+      ],
+    };
+  };
+
+  // 大号组件展示全部卡片（不再截断为前3张），按免息期天数排序填满布局
   const rows = [];
-  for (let index = 0; index < cards.length; index += 2) {
-    const pair = cards.slice(index, index + 2);
+  for (let index = 0; index < allCards.length; index += 2) {
+    const pair = allCards.slice(index, index + 2);
     const children = pair.map(metricCell);
     if (children.length === 1) {
       children.push({ type: 'stack', flex: 1, children: [] });
@@ -388,6 +436,8 @@ function largeWidget(cards, pick) {
       children,
     });
   }
+
+  const urgentCards = dueSoonCards(allCards, now);
 
   return {
     type: 'widget',
@@ -410,6 +460,24 @@ function largeWidget(cards, pick) {
           txt('DAYS', 8, 'bold', C.accent),
         ],
       },
+      ...(urgentCards.length ? [
+        {
+          type: 'stack',
+          direction: 'row',
+          alignItems: 'center',
+          gap: 4,
+          padding: [5, 8],
+          backgroundColor: { light: '#FFF6EC', dark: '#241B0E' },
+          borderRadius: 6,
+          children: [
+            icon('bell.fill', dueSoonColor(urgentCards[0].remaining), 11),
+            txt(
+              `即将还款：${urgentCards.map((c) => `${c.shortName}(${c.remaining <= 0 ? '今天' : c.remaining + '天'})`).join(' · ')}`,
+              9, 'semibold', dueSoonColor(urgentCards[0].remaining), { maxLines: 1 }
+            ),
+          ],
+        },
+      ] : []),
       ...rows,
     ],
   };
@@ -417,7 +485,7 @@ function largeWidget(cards, pick) {
 
 export default async function(ctx) {
   const now = new Date();
-  
+
   const cards = [
     // 仅保留的 6 个银行
     { name: '工商银行', shortName: '工行', tail: '0001', data: sameMonthFixedDuePurchase(now, 1, 25) },
@@ -426,7 +494,7 @@ export default async function(ctx) {
     { name: '招商银行', shortName: '招商', tail: '8209', data: sameMonthFixedDuePurchase(now, 8, 26) },
     { name: '民生银行', shortName: '民生', tail: '2826', data: nextMonthFixedDuePurchase(now, 25, 14) },
     { name: '中信银行', shortName: '中信', tail: '6165', data: nextMonthFixedDuePurchase(now, 14, 3) },
-    
+
     // 其余银行已注释不生效
     /*
     { name: '南京银行', shortName: '南京', tail: '7809', data: nanjingPurchase(now) },
@@ -440,30 +508,40 @@ export default async function(ctx) {
     { name: '江苏银行', shortName: '江苏', tail: '1349', data: offsetPurchase(now, 20, 20) },
     */
   ].sort((a, b) => b.data.days - a.data.days || a.name.localeCompare(b.name, 'zh-CN'));
-  
+
   const pick = recommendation(cards);
   const topCards = cards.slice(0, 3);
-  
+
   if (ctx.widgetFamily === 'accessoryInline') {
+    const urgent = dueSoonCards(cards, now)[0];
+    const text = urgent
+      ? `${urgent.shortName} ${urgent.remaining <= 0 ? '今天还款' : `${urgent.remaining}天后还款`}`
+      : `${pick.title} · ${pick.detail}`;
     return {
       type: 'widget',
-      children: [txt(`${pick.title} · ${pick.detail}`, 12, 'semibold')],
+      children: [txt(text, 12, 'semibold')],
     };
   }
 
   if (ctx.widgetFamily === 'accessoryRectangular') {
+    const urgent = dueSoonCards(cards, now)[0];
     return {
       type: 'widget',
       padding: 8,
       gap: 3,
       children: [
         txt(pick.title, 12, 'bold'),
-        txt(topCards.map((card) => `${card.shortName}${card.data.days}天`).join(' · '), 9, 'medium'),
+        urgent
+          ? txt(
+              `⚠️ ${urgent.shortName} ${urgent.remaining <= 0 ? '今天还款' : `${urgent.remaining}天后还款`}`,
+              9, 'medium', dueSoonColor(urgent.remaining)
+            )
+          : txt(topCards.map((card) => `${card.shortName}${card.data.days}天`).join(' · '), 9, 'medium'),
       ],
     };
   }
 
-  if (ctx.widgetFamily === 'systemSmall') return smallWidget(topCards, pick);
-  if (ctx.widgetFamily === 'systemMedium') return mediumWidget(topCards, pick);
-  return largeWidget(topCards, pick);
+  if (ctx.widgetFamily === 'systemSmall') return smallWidget(topCards, pick, now);
+  if (ctx.widgetFamily === 'systemMedium') return mediumWidget(cards, topCards, pick, now);
+  return largeWidget(cards, pick, now);
 }
