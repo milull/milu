@@ -1,0 +1,682 @@
+const C = {
+  bg: { light: '#EDEFF3', dark: '#08080E' },
+  card: { light: '#FFFFFF', dark: '#12121A' },
+  text: { light: '#1A1A2E', dark: '#EEEEF5' },
+  sub: { light: '#6E6E73', dark: '#8888A0' },
+  line: { light: '#E4E8EE', dark: '#28283A' },
+  panel: { light: '#F5F6FA', dark: '#16161F' },
+  warn: { light: '#FF9500', dark: '#FFB340' },
+  danger: { light: '#FF3B30', dark: '#FF5E5A' },
+  accent: { light: '#00D487', dark: '#7BED5A' },
+  good: { light: '#00B86B', dark: '#7BED5A' },
+  bestBg: { light: '#ECFFF7', dark: '#0E1E14' },
+  urgentBg: { light: '#FFF8F0', dark: '#1E140E' },
+  tomorrowBg: { light: '#F0F4FF', dark: '#0E1420' },
+};
+
+const DUE_SOON_THRESHOLD = 14;
+
+const pad = (n) => String(n).padStart(2, '0');
+
+function localDay(date) {
+  return new Date(date.getFullYear(), date.getMonth(), date.getDate());
+}
+
+function daysBetween(from, to) {
+  return Math.floor((localDay(to) - localDay(from)) / (24 * 60 * 60 * 1000));
+}
+
+function dateLabel(date) {
+  return `${pad(date.getMonth() + 1)}/${pad(date.getDate())}`;
+}
+
+function fullDateLabel(date) {
+  return `${pad(date.getMonth() + 1)}月${pad(date.getDate())}日`;
+}
+
+function calculateCard(now, statementDay, dueDay, dueOffsetMonth = 0) {
+  const currentDay = now.getDate();
+  const currentMonth = now.getMonth();
+  const currentYear = now.getFullYear();
+  
+  let statementMonth = currentMonth;
+  let statementYear = currentYear;
+  if (currentDay >= statementDay) {
+    statementMonth = currentMonth + 1;
+    if (statementMonth > 11) {
+      statementMonth = 0;
+      statementYear = currentYear + 1;
+    }
+  }
+  
+  const statement = new Date(statementYear, statementMonth, statementDay);
+  
+  let dueMonth = statementMonth + dueOffsetMonth;
+  let dueYear = statementYear;
+  if (dueMonth > 11) {
+    dueMonth = 0;
+    dueYear = statementYear + 1;
+  }
+  const due = new Date(dueYear, dueMonth, dueDay);
+  
+  const daysToday = daysBetween(now, due) + 1;
+  const tomorrow = new Date(now);
+  tomorrow.setDate(tomorrow.getDate() + 1);
+  const daysTomorrow = daysBetween(tomorrow, due) + 1;
+  const isStatementDay = (currentDay === statementDay);
+  const remaining = daysBetween(now, due);
+  const recommendToday = !isStatementDay && daysToday > 0;
+  
+  return {
+    statement,
+    due,
+    daysToday: daysToday > 0 ? daysToday : 0,
+    daysTomorrow: daysTomorrow > 0 ? daysTomorrow : 0,
+    isStatementDay,
+    remaining,
+    recommendToday,
+    isTomorrowBest: isStatementDay && daysTomorrow > 0,
+    tomorrowDays: daysTomorrow > 0 ? daysTomorrow : 0,
+  };
+}
+
+function txt(value, size, weight = 'regular', color = C.text, extra = {}) {
+  return {
+    type: 'text',
+    text: String(value),
+    font: { size, weight },
+    textColor: color,
+    maxLines: 1,
+    minScale: 0.5,
+    ...extra,
+  };
+}
+
+function icon(name, color, size = 16) {
+  return {
+    type: 'image',
+    src: `sf-symbol:${name}`,
+    color,
+    width: size,
+    height: size,
+  };
+}
+
+function recommendation(cards) {
+  const validCards = cards.filter(c => c.data.recommendToday && c.data.daysToday > 0);
+  if (validCards.length === 0) {
+    return { title: '今日无推荐', detail: '建议使用其他卡', color: C.sub, days: 0 };
+  }
+  const maxDays = Math.max(...validCards.map(c => c.data.daysToday));
+  const winners = validCards.filter(c => c.data.daysToday === maxDays);
+  const names = winners.map(c => c.shortName).join('+');
+  return {
+    title: `优先刷${names}`,
+    detail: `${maxDays}天免息`,
+    color: C.good,
+    days: maxDays,
+  };
+}
+
+function dueSoonCards(cards, now) {
+  return cards
+    .filter(c => c.data.remaining >= 0 && c.data.remaining <= DUE_SOON_THRESHOLD)
+    .sort((a, b) => a.data.remaining - b.data.remaining);
+}
+
+function dueSoonColor(remaining) {
+  if (remaining <= 0) return C.danger;
+  if (remaining <= 3) return C.danger;
+  if (remaining <= 7) return C.warn;
+  return { light: '#FFA500', dark: '#FFB340' };
+}
+
+function dueSoonLabel(remaining) {
+  if (remaining <= 0) return '今天!';
+  if (remaining <= 3) return '紧急';
+  if (remaining <= 7) return '临期';
+  return '将到';
+}
+
+// ============ 中号组件 ============
+function mediumWidget(allCards, pick, now) {
+  const sortedByDays = [...allCards]
+    .filter(c => c.data.recommendToday && c.data.daysToday > 0)
+    .sort((a, b) => b.data.daysToday - a.data.daysToday);
+  
+  const bestOne = sortedByDays[0];
+  const urgentCards = dueSoonCards(allCards, now);
+  const tomorrowBestCards = allCards.filter(c => c.data.isTomorrowBest);
+  
+  const displayCards = [];
+  const displayedNames = new Set();
+  
+  if (bestOne) {
+    displayCards.push({ card: bestOne, type: 'best' });
+    displayedNames.add(bestOne.name);
+  }
+  
+  let urgentAdded = 0;
+  for (const c of urgentCards) {
+    if (displayedNames.has(c.name)) continue;
+    if (displayCards.length < 3) {
+      displayCards.push({ card: c, type: 'urgent' });
+      displayedNames.add(c.name);
+      urgentAdded++;
+    }
+  }
+  
+  if (displayCards.length < 3) {
+    for (const c of tomorrowBestCards) {
+      if (!displayedNames.has(c.name) && displayCards.length < 3) {
+        displayCards.push({ card: c, type: 'tomorrow' });
+        displayedNames.add(c.name);
+      }
+    }
+  }
+  
+  if (displayCards.length < 3) {
+    for (const c of sortedByDays) {
+      if (!displayedNames.has(c.name) && displayCards.length < 3) {
+        displayCards.push({ card: c, type: 'normal' });
+        displayedNames.add(c.name);
+      }
+    }
+  }
+  
+  while (displayCards.length < 3) {
+    for (const c of allCards) {
+      if (!displayedNames.has(c.name) && displayCards.length < 3) {
+        displayCards.push({ card: c, type: 'normal' });
+        displayedNames.add(c.name);
+      }
+    }
+  }
+
+  const renderCard = (item) => {
+    const { card, type } = item;
+    const isBest = type === 'best';
+    const isTomorrow = type === 'tomorrow';
+    const isUrgent = type === 'urgent';
+    const days = isTomorrow ? card.data.tomorrowDays : card.data.daysToday;
+    const remaining = card.data.remaining;
+    
+    let color = C.sub;
+    let bgColor = C.panel;
+    let borderColor = C.line;
+    let badge = '';
+    let badgeColor = color;
+    let badgeTextColor = { light: '#FFFFFF', dark: '#FFFFFF' };
+    let bottomText = '📅 还款日';
+    let bottomRight = `${days}天免息`;
+    
+    if (isBest) {
+      color = C.accent;
+      bgColor = C.bestBg;
+      borderColor = C.accent;
+      badge = '⭐推荐';
+      badgeColor = C.accent;
+      badgeTextColor = { light: '#FFFFFF', dark: '#071108' };
+      bottomRight = `${days}天免息`;
+    } else if (isUrgent) {
+      color = dueSoonColor(remaining);
+      bgColor = C.urgentBg;
+      borderColor = color;
+      badge = `⚠️${dueSoonLabel(remaining)}`;
+      badgeColor = color;
+      bottomText = `⏰${remaining}天后到期`;
+      bottomRight = `剩${remaining}天`;
+    } else if (isTomorrow) {
+      color = { light: '#4A7AFF', dark: '#6A9AFF' };
+      bgColor = C.tomorrowBg;
+      borderColor = { light: '#4A7AFF', dark: '#6A9AFF' };
+      badge = `✨明日${card.data.tomorrowDays}天`;
+      badgeColor = { light: '#4A7AFF', dark: '#6A9AFF' };
+      bottomText = '⏳今日账单日·明日刷';
+      bottomRight = `${card.data.tomorrowDays}天免息`;
+    }
+    
+    return {
+      type: 'stack',
+      direction: 'column',
+      flex: 1,
+      gap: 1,
+      padding: [10, 12],
+      backgroundColor: bgColor,
+      borderRadius: 10,
+      borderWidth: (isBest || isTomorrow || isUrgent) ? 2 : 0.5,
+      borderColor: borderColor,
+      shadow: {
+        color: { light: 'rgba(0,0,0,0.04)', dark: 'rgba(0,0,0,0.2)' },
+        radius: 4,
+        offset: { width: 0, height: 2 },
+        opacity: 0.4,
+      },
+      children: [
+        {
+          type: 'stack',
+          direction: 'row',
+          alignItems: 'center',
+          gap: 3,
+          children: [
+            icon(isBest ? 'star.fill' : (isTomorrow ? 'calendar.badge.clock' : (isUrgent ? 'exclamationmark.triangle.fill' : 'creditcard.fill')), color, 14),
+            txt(card.name, 10, 'bold', (isBest || isTomorrow || isUrgent) ? color : C.text),
+            { type: 'spacer' },
+            txt(`··${card.tail}`, 7, 'medium', C.sub),
+            ...(badge ? [{
+              type: 'stack',
+              padding: [1, 6],
+              backgroundColor: badgeColor,
+              borderRadius: 6,
+              children: [txt(badge, 6, 'bold', badgeTextColor)],
+            }] : []),
+          ],
+        },
+        {
+          type: 'stack',
+          direction: 'row',
+          alignItems: 'end',
+          padding: [2, 0, 1, 0],
+          children: [
+            txt(days, 30, 'bold', color),
+            txt('天', 10, 'semibold', color),
+            { type: 'spacer' },
+            txt(dateLabel(card.data.due), 9, 'medium', C.sub),
+          ],
+        },
+        {
+          type: 'stack',
+          direction: 'row',
+          padding: [2, 0, 0, 0],
+          borderTop: { width: 0.5, color: C.line },
+          children: [
+            txt(bottomText, 7, 'medium', C.sub),
+            { type: 'spacer' },
+            txt(bottomRight, 7, 'semibold', (isBest || isTomorrow || isUrgent) ? color : C.good),
+          ],
+        },
+      ],
+    };
+  };
+
+  const hasUrgent = displayCards.some(item => item.type === 'urgent');
+  const urgentCount = displayCards.filter(item => item.type === 'urgent').length;
+
+  return {
+    type: 'widget',
+    padding: 10,
+    gap: 6,
+    backgroundColor: C.bg,
+    children: [
+      {
+        type: 'stack',
+        direction: 'row',
+        alignItems: 'center',
+        padding: [4, 10],
+        backgroundColor: { light: 'rgba(255,255,255,0.4)', dark: 'rgba(18,18,26,0.4)' },
+        borderRadius: 8,
+        borderWidth: 0.5,
+        borderColor: { light: 'rgba(0,212,135,0.10)', dark: 'rgba(123,237,90,0.06)' },
+        children: [
+          icon('sparkles', C.accent, 11),
+          { type: 'spacer', length: 4 },
+          txt('今日刷卡建议', 10, 'bold'),
+          { type: 'spacer' },
+          txt('按免息期排序 · 前3名', 8, 'medium', C.sub),
+          ...(hasUrgent ? [
+            { type: 'spacer', length: 6 },
+            {
+              type: 'stack',
+              padding: [1, 6],
+              backgroundColor: C.warn,
+              borderRadius: 8,
+              children: [txt(`⚠️${urgentCount}临期`, 6, 'bold', { light: '#FFFFFF', dark: '#FFFFFF' })],
+            },
+          ] : []),
+        ],
+      },
+      {
+        type: 'stack',
+        direction: 'row',
+        gap: 8,
+        children: displayCards.map(item => renderCard(item)),
+      },
+    ],
+  };
+}
+
+// ============ 大号组件 - 宽版独立感 ============
+function largeWidget(allCards, pick, now) {
+  const sortedByDays = [...allCards]
+    .filter(c => c.data.recommendToday && c.data.daysToday > 0)
+    .sort((a, b) => b.data.daysToday - a.data.daysToday);
+  
+  const bestOne = sortedByDays[0];
+  const urgentCards = dueSoonCards(allCards, now);
+  const tomorrowBestCards = allCards.filter(c => c.data.isTomorrowBest);
+  
+  const displayCards = [];
+  const displayedNames = new Set();
+  
+  if (bestOne) {
+    displayCards.push({ card: bestOne, type: 'best' });
+    displayedNames.add(bestOne.name);
+  }
+  
+  for (const c of urgentCards) {
+    if (displayedNames.has(c.name)) continue;
+    if (displayCards.length >= 6) break;
+    displayCards.push({ card: c, type: 'urgent' });
+    displayedNames.add(c.name);
+  }
+  
+  if (displayCards.length < 6) {
+    for (const c of tomorrowBestCards) {
+      if (!displayedNames.has(c.name) && displayCards.length < 6) {
+        displayCards.push({ card: c, type: 'tomorrow' });
+        displayedNames.add(c.name);
+      }
+    }
+  }
+  
+  if (displayCards.length < 6) {
+    for (const c of sortedByDays) {
+      if (!displayedNames.has(c.name) && displayCards.length < 6) {
+        displayCards.push({ card: c, type: 'normal' });
+        displayedNames.add(c.name);
+      }
+    }
+  }
+  
+  while (displayCards.length < 6) {
+    for (const c of allCards) {
+      if (!displayedNames.has(c.name) && displayCards.length < 6) {
+        displayCards.push({ card: c, type: 'normal' });
+        displayedNames.add(c.name);
+      }
+    }
+  }
+
+  const renderItem = (item) => {
+    const { card, type } = item;
+    const isBest = type === 'best';
+    const isTomorrow = type === 'tomorrow';
+    const isUrgent = type === 'urgent';
+    const days = isTomorrow ? card.data.tomorrowDays : card.data.daysToday;
+    const remaining = card.data.remaining;
+    
+    let color = C.sub;
+    let bgColor = C.panel;
+    let borderColor = C.line;
+    let badge = '';
+    let badgeColor = color;
+    let badgeTextColor = { light: '#FFFFFF', dark: '#FFFFFF' };
+    let bottomLeft = `${fullDateLabel(card.data.statement)}出账`;
+    let bottomRight = `${days}天`;
+    
+    if (isBest) {
+      color = C.accent;
+      bgColor = C.bestBg;
+      borderColor = C.accent;
+      badge = '⭐推荐';
+      badgeColor = C.accent;
+      badgeTextColor = { light: '#FFFFFF', dark: '#071108' };
+      bottomRight = `${days}天`;
+    } else if (isUrgent) {
+      color = dueSoonColor(remaining);
+      bgColor = C.urgentBg;
+      borderColor = color;
+      badge = `⚠️${dueSoonLabel(remaining)}`;
+      badgeColor = color;
+      bottomLeft = `⏰${remaining}天后到期`;
+      bottomRight = `剩${remaining}天`;
+    } else if (isTomorrow) {
+      color = { light: '#4A7AFF', dark: '#6A9AFF' };
+      bgColor = C.tomorrowBg;
+      borderColor = { light: '#4A7AFF', dark: '#6A9AFF' };
+      badge = `✨明日${card.data.tomorrowDays}天`;
+      badgeColor = { light: '#4A7AFF', dark: '#6A9AFF' };
+      bottomLeft = '⏳今日账单日·明日刷';
+      bottomRight = `${card.data.tomorrowDays}天`;
+    }
+    
+    return {
+      type: 'stack',
+      direction: 'column',
+      flex: 1,
+      gap: 1,
+      padding: [12, 14],
+      backgroundColor: bgColor,
+      borderRadius: 10,
+      borderWidth: (isBest || isTomorrow || isUrgent) ? 2 : 0.5,
+      borderColor: borderColor,
+      shadow: {
+        color: { light: 'rgba(0,0,0,0.04)', dark: 'rgba(0,0,0,0.2)' },
+        radius: 6,
+        offset: { width: 0, height: 3 },
+        opacity: 0.4,
+      },
+      children: [
+        {
+          type: 'stack',
+          direction: 'row',
+          alignItems: 'center',
+          gap: 3,
+          children: [
+            icon(isBest ? 'star.fill' : (isTomorrow ? 'calendar.badge.clock' : (isUrgent ? 'exclamationmark.triangle.fill' : 'creditcard.fill')), color, 14),
+            txt(card.name, 10, 'bold', (isBest || isTomorrow || isUrgent) ? color : C.text),
+            { type: 'spacer' },
+            txt(`··${card.tail}`, 7, 'medium', C.sub),
+            ...(badge ? [{
+              type: 'stack',
+              padding: [1, 6],
+              backgroundColor: badgeColor,
+              borderRadius: 6,
+              children: [txt(badge, 6, 'bold', badgeTextColor)],
+            }] : []),
+          ],
+        },
+        {
+          type: 'stack',
+          direction: 'row',
+          alignItems: 'end',
+          padding: [2, 0, 1, 0],
+          children: [
+            txt(days, 30, 'bold', color),
+            txt('天', 10, 'semibold', color),
+            { type: 'spacer' },
+            txt(dateLabel(card.data.due), 9, 'medium', C.sub),
+          ],
+        },
+        {
+          type: 'stack',
+          direction: 'row',
+          padding: [2, 0, 0, 0],
+          borderTop: { width: 0.5, color: C.line },
+          children: [
+            txt(bottomLeft, 7, 'medium', C.sub),
+            { type: 'spacer' },
+            txt(bottomRight, 7, 'semibold', (isBest || isTomorrow || isUrgent) ? color : C.good),
+          ],
+        },
+      ],
+    };
+  };
+
+  const hasUrgent = displayCards.some(item => item.type === 'urgent');
+  const urgentCount = displayCards.filter(item => item.type === 'urgent').length;
+
+  const rows = [];
+  for (let i = 0; i < displayCards.length; i += 2) {
+    const rowItems = displayCards.slice(i, i + 2);
+    rows.push({
+      type: 'stack',
+      direction: 'row',
+      gap: 8,
+      children: rowItems.map(item => renderItem(item)),
+    });
+  }
+
+  return {
+    type: 'widget',
+    padding: 10,
+    gap: 6,
+    backgroundColor: C.bg,
+    children: [
+      {
+        type: 'stack',
+        direction: 'row',
+        alignItems: 'end',
+        padding: [5, 12],
+        backgroundColor: { light: 'rgba(255,255,255,0.4)', dark: 'rgba(18,18,26,0.4)' },
+        borderRadius: 10,
+        borderWidth: 0.5,
+        borderColor: { light: 'rgba(0,212,135,0.10)', dark: 'rgba(123,237,90,0.06)' },
+        shadow: {
+          color: { light: 'rgba(0,0,0,0.02)', dark: 'rgba(0,0,0,0.1)' },
+          radius: 2,
+          offset: { width: 0, height: 1 },
+          opacity: 0.3,
+        },
+        children: [
+          {
+            type: 'stack',
+            direction: 'column',
+            gap: 1,
+            children: [
+              txt(pick.title, 14, 'bold', pick.color),
+              txt('按今天消费的实际免息期排序', 7, 'medium', C.sub),
+            ],
+          },
+          { type: 'spacer' },
+          txt(pick.days, 26, 'bold', C.accent),
+          txt('DAYS', 7, 'bold', C.accent),
+          ...(hasUrgent ? [
+            { type: 'spacer', length: 6 },
+            {
+              type: 'stack',
+              padding: [1, 6],
+              backgroundColor: C.warn,
+              borderRadius: 8,
+              children: [txt(`⚠️${urgentCount}临期`, 6, 'bold', { light: '#FFFFFF', dark: '#FFFFFF' })],
+            },
+          ] : []),
+        ],
+      },
+      {
+        type: 'stack',
+        height: 0.5,
+        backgroundColor: C.line,
+      },
+      ...rows,
+    ],
+  };
+}
+
+export default async function(ctx) {
+  const now = new Date();
+
+  const cards = [
+    { name: '中信银行', shortName: '中信', tail: '6165', data: calculateCard(now, 14, 3, 1) },
+    { name: '广发银行', shortName: '广发', tail: '8888', data: calculateCard(now, 13, 2, 1) },
+    { name: '招商银行', shortName: '招商', tail: '8209', data: calculateCard(now, 8, 26, 0) },
+    { name: '工商银行', shortName: '工行', tail: '0001', data: calculateCard(now, 1, 25, 0) },
+    { name: '兴业银行', shortName: '兴业', tail: '9226', data: calculateCard(now, 3, 23, 0) },
+    { name: '民生银行', shortName: '民生', tail: '2826', data: calculateCard(now, 25, 14, 1) },
+  ];
+
+  const sortedCards = [...cards].sort((a, b) => {
+    const aDays = a.data.recommendToday ? a.data.daysToday : 0;
+    const bDays = b.data.recommendToday ? b.data.daysToday : 0;
+    return bDays - aDays || a.name.localeCompare(b.name, 'zh-CN');
+  });
+
+  const pick = recommendation(sortedCards);
+
+  if (ctx.widgetFamily === 'accessoryInline') {
+    const urgent = dueSoonCards(sortedCards, now)[0];
+    const text = urgent
+      ? `${urgent.shortName} ${urgent.data.remaining <= 0 ? '今天还款' : `${urgent.data.remaining}天后还款`}`
+      : `${pick.title} · ${pick.detail}`;
+    return {
+      type: 'widget',
+      children: [txt(text, 12, 'semibold')],
+    };
+  }
+
+  if (ctx.widgetFamily === 'accessoryRectangular') {
+    const urgent = dueSoonCards(sortedCards, now)[0];
+    return {
+      type: 'widget',
+      padding: 8,
+      gap: 3,
+      children: [
+        txt(pick.title, 12, 'bold'),
+        urgent
+          ? txt(
+              `⚠️ ${urgent.shortName} ${urgent.data.remaining <= 0 ? '今天还款' : `${urgent.data.remaining}天后还款`}`,
+              9, 'medium', dueSoonColor(urgent.data.remaining)
+            )
+          : txt(sortedCards.slice(0, 3).filter(c => c.data.recommendToday).map(c => `${c.shortName}${c.data.daysToday}天`).join(' · '), 9, 'medium'),
+      ],
+    };
+  }
+
+  if (ctx.widgetFamily === 'systemSmall') {
+    const first = sortedCards.filter(c => c.data.recommendToday)[0];
+    const second = sortedCards.filter(c => c.data.recommendToday)[1];
+    const third = sortedCards.filter(c => c.data.recommendToday)[2];
+    const urgent = dueSoonCards(sortedCards, now)[0];
+    return {
+      type: 'widget',
+      padding: 14,
+      gap: 8,
+      backgroundColor: C.bg,
+      children: [
+        txt('今日刷卡', 13, 'bold'),
+        txt(pick.title, 16, 'bold', pick.color),
+        txt(pick.detail, 11, 'medium', C.sub),
+        ...(urgent ? [
+          {
+            type: 'stack',
+            direction: 'row',
+            alignItems: 'center',
+            gap: 4,
+            children: [
+              icon('exclamationmark.triangle.fill', dueSoonColor(urgent.data.remaining), 11),
+              txt(
+                `${urgent.shortName} ${urgent.data.remaining <= 0 ? '今天还款' : `${urgent.data.remaining}天后还款`}`,
+                10, 'semibold', dueSoonColor(urgent.data.remaining)
+              ),
+            ],
+          },
+        ] : []),
+        { type: 'spacer' },
+        ...(first ? [{
+          type: 'stack',
+          direction: 'row',
+          children: [
+            txt(`${first.shortName} ${first.data.daysToday}天`, 11, 'semibold'),
+            { type: 'spacer' },
+            txt(second ? `${second.shortName} ${second.data.daysToday}天` : '—', 11, 'semibold'),
+          ],
+        }] : []),
+        ...(third ? [{
+          type: 'stack',
+          direction: 'row',
+          children: [
+            txt(`第3名 ${third.shortName}`, 10, 'medium', C.sub),
+            { type: 'spacer' },
+            txt(`${third.data.daysToday}天`, 10, 'semibold'),
+          ],
+        }] : []),
+      ],
+    };
+  }
+
+  if (ctx.widgetFamily === 'systemMedium') {
+    return mediumWidget(sortedCards, pick, now);
+  }
+  
+  return largeWidget(sortedCards, pick, now);
+}
