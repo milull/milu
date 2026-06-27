@@ -1,5 +1,5 @@
 /**
- * Egern widget: Subscription Traffic
+ * Egern widget: Subscription Traffic (+ Node Count)
  *
  * Create a Generic script with this file.
  * Required env:
@@ -137,6 +137,84 @@ function applyPlanTotal(ctx, traffic) {
   };
 }
 
+// ---------------------------------------------------------------------------
+// Node-count detection
+//
+// Subscription responses are usually one of:
+//   1) A Clash/Clash.Meta YAML config with a top-level `proxies:` list
+//   2) A Base64-encoded blob that decodes into a newline-separated list of
+//      proxy links (ss://, vmess://, trojan://, ...)
+//   3) A plain-text list of those same proxy links (no Base64 wrapper)
+// countNodes() tries all three and returns the best guess, or 0 if none match.
+// ---------------------------------------------------------------------------
+
+function base64ToString(base64) {
+  const cleaned = String(base64).replace(/[^A-Za-z0-9+/=]/g, '');
+  if (!cleaned) return '';
+  const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+  let output = '';
+  let buffer = 0;
+  let bits = 0;
+  for (let i = 0; i < cleaned.length; i += 1) {
+    const char = cleaned[i];
+    if (char === '=') break;
+    const index = alphabet.indexOf(char);
+    if (index < 0) continue;
+    buffer = (buffer << 6) | index;
+    bits += 6;
+    if (bits >= 8) {
+      bits -= 8;
+      output += String.fromCharCode((buffer >> bits) & 0xFF);
+    }
+  }
+  return output;
+}
+
+const NODE_PROTOCOLS = [
+  'vmess://', 'vless://', 'trojan://', 'hysteria2://', 'hysteria://',
+  'hy2://', 'tuic://', 'ssr://', 'ss://', 'snell://'
+];
+
+function countProtocolLinks(text) {
+  if (!text) return 0;
+  let total = 0;
+  for (const protocol of NODE_PROTOCOLS) {
+    // (^|[^A-Za-z]) avoids "ss://" false-matching inside "vmess://" / "vless://".
+    const matches = text.match(new RegExp(`(^|[^A-Za-z])${protocol}`, 'g'));
+    if (matches) total += matches.length;
+  }
+  return total;
+}
+
+function countClashProxies(text) {
+  const startMatch = text.match(/^proxies:\s*$/m);
+  if (!startMatch) return 0;
+  const rest = text.slice(startMatch.index + startMatch[0].length);
+  const endMatch = rest.match(/\n[^\s#][^\n]*:/);
+  const section = endMatch ? rest.slice(0, endMatch.index) : rest;
+  const nameMatches = section.match(/(^|[\s{,])name:\s*['"]?/g);
+  return nameMatches ? nameMatches.length : 0;
+}
+
+function countNodes(bodyText) {
+  if (!bodyText) return 0;
+  const raw = String(bodyText);
+
+  const direct = countProtocolLinks(raw);
+  if (direct > 0) return direct;
+
+  const clash = countClashProxies(raw);
+  if (clash > 0) return clash;
+
+  const trimmed = raw.trim();
+  if (trimmed.length > 20 && /^[A-Za-z0-9+/=\s]+$/.test(trimmed)) {
+    const decodedCount = countProtocolLinks(base64ToString(trimmed));
+    if (decodedCount > 0) return decodedCount;
+  }
+
+  return 0;
+}
+
 async function fetchSubscription(ctx, url) {
   const customUA = String(ctx.env?.SUBSCRIPTION_USER_AGENT || '').trim();
   const userAgents = [...new Set([
@@ -149,13 +227,20 @@ async function fetchSubscription(ctx, url) {
 
   const extract = async response => {
     const headerData = parseUserInfo(readHeader(response?.headers, 'subscription-userinfo'));
-    if (headerData) return headerData;
+    let bodyText = '';
     try {
-      return parseBodyInfo(await response.text());
+      bodyText = await response.text();
     } catch {
-      return null;
+      bodyText = '';
     }
+    return {
+      traffic: headerData || parseBodyInfo(bodyText),
+      nodeCount: countNodes(bodyText)
+    };
   };
+
+  let bestNodeCount = 0;
+  let succeeded = false;
 
   for (const userAgent of userAgents) {
     try {
@@ -164,9 +249,11 @@ async function fetchSubscription(ctx, url) {
         redirect: 'manual',
         headers: { 'User-Agent': userAgent }
       });
+      succeeded = true;
 
       const direct = await extract(response);
-      if (direct) return direct;
+      bestNodeCount = Math.max(bestNodeCount, direct.nodeCount);
+      if (direct.traffic) return { traffic: direct.traffic, nodeCount: bestNodeCount };
 
       const location = readHeader(response.headers, 'location');
       if (location && response.status >= 300 && response.status < 400) {
@@ -177,14 +264,16 @@ async function fetchSubscription(ctx, url) {
           headers: { 'User-Agent': userAgent }
         });
         const final = await extract(redirected);
-        if (final) return final;
+        bestNodeCount = Math.max(bestNodeCount, final.nodeCount);
+        if (final.traffic) return { traffic: final.traffic, nodeCount: bestNodeCount };
       }
     } catch {
       // Try the next common subscription client identity.
     }
   }
 
-  throw new Error('订阅未返回可识别的流量信息');
+  if (!succeeded) throw new Error('订阅请求失败，请检查链接或网络');
+  return { traffic: null, nodeCount: bestNodeCount };
 }
 
 async function loadData(ctx) {
@@ -194,10 +283,22 @@ async function loadData(ctx) {
 
   const key = storageKey(url);
   try {
-    const traffic = applyPlanTotal(ctx, await fetchSubscription(ctx, url));
-    const result = { mode: 'live', name, traffic, updatedAt: Date.now() };
-    ctx.storage?.setJSON(key, result);
-    return result;
+    const fetched = await fetchSubscription(ctx, url);
+
+    if (fetched.traffic) {
+      const traffic = applyPlanTotal(ctx, fetched.traffic);
+      const result = { mode: 'live', name, traffic, nodeCount: fetched.nodeCount, updatedAt: Date.now() };
+      ctx.storage?.setJSON(key, result);
+      return result;
+    }
+
+    if (fetched.nodeCount > 0) {
+      const result = { mode: 'nodesOnly', name, nodeCount: fetched.nodeCount, updatedAt: Date.now() };
+      ctx.storage?.setJSON(key, result);
+      return result;
+    }
+
+    throw new Error('订阅未返回可识别的流量信息');
   } catch (error) {
     const cached = ctx.storage?.getJSON(key);
     if (cached?.traffic) {
@@ -208,6 +309,9 @@ async function loadData(ctx) {
         name,
         error: String(error?.message || error)
       };
+    }
+    if (cached?.nodeCount) {
+      return { ...cached, mode: 'stale', name, error: String(error?.message || error) };
     }
     return { mode: 'error', name, error: String(error?.message || error || '加载失败') };
   }
@@ -220,6 +324,7 @@ function daysRemaining(expireAt) {
 
 function statusOf(data) {
   if (data.mode === 'setup') return { label: 'SETUP', color: C.dim };
+  if (data.mode === 'nodesOnly') return { label: 'NODES', color: C.accent };
   if (data.mode === 'error') return { label: 'ERROR', color: C.fail };
   if (data.mode === 'stale') return { label: 'STALE', color: C.warn };
 
@@ -271,6 +376,10 @@ function optionalBytes(value) {
 function totalLabel(traffic) {
   if (traffic.unlimited) return '不限量';
   return optionalBytes(traffic.total);
+}
+
+function nodeCountLabel(data) {
+  return Number.isFinite(data.nodeCount) && data.nodeCount > 0 ? `${data.nodeCount} 节点` : '';
 }
 
 function bytesToBase64(bytes) {
@@ -513,12 +622,57 @@ function emptyWidget(data, family, ctx) {
   };
 }
 
+function nodesOnlyWidget(data, family, ctx) {
+  const isSmall = family === 'systemSmall';
+  const refreshHours = numberEnv(ctx, 'REFRESH_HOURS', 2, 0.5, 24);
+  return {
+    type: 'widget',
+    backgroundColor: C.bg,
+    padding: isSmall ? 14 : 16,
+    gap: 8,
+    refreshAfter: new Date(Date.now() + refreshHours * 3600000).toISOString(),
+    children: [
+      header(data),
+      { type: 'spacer' },
+      {
+        type: 'stack',
+        direction: 'row',
+        children: [
+          { type: 'spacer' },
+          {
+            type: 'stack',
+            direction: 'column',
+            alignItems: 'center',
+            gap: 6,
+            children: [
+              icon('point.3.filled.connected.trianglepath.dotted', C.accent, isSmall ? 22 : 26),
+              text(String(data.nodeCount), isSmall ? 26 : 32, C.text, 'bold', {
+                font: { size: isSmall ? 26 : 32, weight: 'bold', family: 'Menlo' }
+              }),
+              text('可用节点', 10, C.dim, 'semibold'),
+              text(
+                data.mode === 'stale' ? `流量信息读取失败：${data.error}` : '订阅未提供流量信息',
+                9, C.dim, 'medium', { minScale: 0.6 }
+              )
+            ]
+          },
+          { type: 'spacer' }
+        ]
+      },
+      { type: 'spacer' }
+    ]
+  };
+}
+
 function mediumWidget(data, ctx) {
-  if (!data.traffic) return emptyWidget(data, 'systemMedium', ctx);
+  if (!data.traffic) {
+    return data.nodeCount > 0 ? nodesOnlyWidget(data, 'systemMedium', ctx) : emptyWidget(data, 'systemMedium', ctx);
+  }
   const traffic = data.traffic;
   const days = daysRemaining(traffic.expireAt);
   const refreshHours = numberEnv(ctx, 'REFRESH_HOURS', 2, 0.5, 24);
   const daysText = days == null ? '长期' : `${Math.max(0, days)} 天`;
+  const nodes = nodeCountLabel(data);
 
   return {
     type: 'widget',
@@ -557,7 +711,10 @@ function mediumWidget(data, ctx) {
                   text(`剩余 ${daysText}`, 10, C.dim, 'medium', { minScale: 0.72 })
                 ]
               },
-              leadingLine(text(`到期 ${formatDate(traffic.expireAt)}`, 9, C.dim, 'medium', { minScale: 0.72 }), 200),
+              leadingLine(text(
+                nodes ? `到期 ${formatDate(traffic.expireAt)} · ${nodes}` : `到期 ${formatDate(traffic.expireAt)}`,
+                9, C.dim, 'medium', { minScale: 0.65 }
+              ), 200),
               { type: 'spacer' },
               leadingLine(text(data.name, 9, C.dim, 'medium', { minScale: 0.7 }), 200)
             ]
@@ -581,10 +738,13 @@ function mediumWidget(data, ctx) {
 }
 
 function smallWidget(data, ctx) {
-  if (!data.traffic) return emptyWidget(data, 'systemSmall', ctx);
+  if (!data.traffic) {
+    return data.nodeCount > 0 ? nodesOnlyWidget(data, 'systemSmall', ctx) : emptyWidget(data, 'systemSmall', ctx);
+  }
   const traffic = data.traffic;
   const percent = percentRemaining(traffic);
   const refreshHours = numberEnv(ctx, 'REFRESH_HOURS', 2, 0.5, 24);
+  const nodes = nodeCountLabel(data);
   return {
     type: 'widget',
     backgroundColor: C.bg,
@@ -609,13 +769,15 @@ function smallWidget(data, ctx) {
       },
       progressOrNote(traffic, 126),
       { type: 'spacer' },
-      text(formatDate(traffic.expireAt), 9, C.dim, 'medium')
+      text(nodes ? `${formatDate(traffic.expireAt)} · ${nodes}` : formatDate(traffic.expireAt), 9, C.dim, 'medium')
     ]
   };
 }
 
 function largeWidget(data, ctx) {
-  if (!data.traffic) return emptyWidget(data, 'systemLarge', ctx);
+  if (!data.traffic) {
+    return data.nodeCount > 0 ? nodesOnlyWidget(data, 'systemLarge', ctx) : emptyWidget(data, 'systemLarge', ctx);
+  }
   const traffic = data.traffic;
   const percent = percentRemaining(traffic);
   const days = daysRemaining(traffic.expireAt);
@@ -673,6 +835,7 @@ function largeWidget(data, ctx) {
         gap: 12,
         children: [
           metric('套餐总量', totalLabel(traffic)),
+          metric('节点数', data.nodeCount > 0 ? `${data.nodeCount} 个` : '--'),
           metric('剩余天数', days == null ? '长期' : `${Math.max(0, days)} 天`),
           metric('日均可用', daily == null ? '--' : formatBytes(daily))
         ]
@@ -692,12 +855,16 @@ function largeWidget(data, ctx) {
 
 function lockWidget(data, family) {
   if (!data.traffic) {
-    const label = data.mode === 'setup' ? '订阅流量：待配置' : '订阅流量：读取失败';
+    let label;
+    if (data.nodeCount > 0) label = `可用节点：${data.nodeCount}`;
+    else if (data.mode === 'setup') label = '订阅流量：待配置';
+    else label = '订阅流量：读取失败';
     return { type: 'widget', children: [text(label, 12, C.text, 'semibold')] };
   }
   const traffic = data.traffic;
   const percent = percentRemaining(traffic);
   const remaining = formatBytes(traffic.remaining);
+  const nodes = nodeCountLabel(data);
   if (family === 'accessoryInline') {
     return { type: 'widget', children: [text(`剩余 ${remaining}${percent == null ? '' : ` · ${percent.toFixed(0)}%`}`, 12, C.text, 'semibold')] };
   }
@@ -722,7 +889,10 @@ function lockWidget(data, family) {
         gap: 5,
         children: [icon('chart.pie.fill', C.text, 12), text(data.name, 11, C.text, 'semibold')]
       },
-      text(`剩余 ${remaining} · 到期 ${formatDate(traffic.expireAt)}`, 12, C.text, 'bold')
+      text(
+        nodes ? `剩余 ${remaining} · 到期 ${formatDate(traffic.expireAt)} · ${nodes}` : `剩余 ${remaining} · 到期 ${formatDate(traffic.expireAt)}`,
+        12, C.text, 'bold'
+      )
     ]
   };
 }
