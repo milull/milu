@@ -1,30 +1,30 @@
 name: 机场流量订阅监控
-desc: 监控并展示节点订阅的剩余流量、已用流量以及到期时间（支持通过模块配置直接调整参数）。
+desc: 监控并展示节点订阅的剩余流量、已用流量以及到期时间。
 category: Widget
 arguments:
   - key: SUBSCRIPTION_URL
-    title: 订阅地址
-    desc: 你的机场或服务商订阅链接（必填）
+    title: "订阅地址"
+    desc: "你的机场或服务商订阅链接（必填）"
     type: string
     defaultValue: ""
   - key: PLAN_TOTAL_GB
-    title: 套餐总流量 (GB)
-    desc: 当服务商未返回总流量时，以此默认值计算已用比例
+    title: "套餐总流量 (GB)"
+    desc: "当服务商未返回总流量时，以此默认值计算已用比例"
     type: string
     defaultValue: "100"
   - key: SUBSCRIPTION_NAME
-    title: 订阅名称
-    desc: 组件上显示的名称
+    title: "订阅名称"
+    desc: "小组件上显示的自定义名称"
     type: string
     defaultValue: "My Subscription"
   - key: REFRESH_HOURS
-    title: 刷新间隔 (小时)
-    desc: 组件自动刷新数据的间隔时间
+    title: "刷新间隔 (小时)"
+    desc: "组件自动刷新数据的间隔时间"
     type: string
     defaultValue: "2"
   - key: SUBSCRIPTION_USER_AGENT
-    title: 自定义 User-Agent
-    desc: 模拟请求订阅时使用的客户端 UA
+    title: "自定义 User-Agent"
+    desc: "模拟请求订阅时使用的客户端 UA"
     type: string
     defaultValue: "clash.meta"
 scripting:
