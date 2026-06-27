@@ -1,5 +1,5 @@
 /**
- * Egern widget: Subscription Traffic (+ Node Count)
+ * Egern widget: Subscription Traffic (+ Node Count + Reset Countdown)
  *
  * Create a Generic script with this file.
  * Required env:
@@ -9,6 +9,8 @@
  *   REFRESH_HOURS=2
  *   SUBSCRIPTION_USER_AGENT=clash.meta
  *   PLAN_TOTAL_GB=100 (default)
+ *   RESET_DAY=1 (day of month, 1-31, traffic resets on this day each month;
+ *               leave blank to hide the reset countdown)
  */
 
 const C = {
@@ -139,13 +141,6 @@ function applyPlanTotal(ctx, traffic) {
 
 // ---------------------------------------------------------------------------
 // Node-count detection
-//
-// Subscription responses are usually one of:
-//   1) A Clash/Clash.Meta YAML config with a top-level `proxies:` list
-//   2) A Base64-encoded blob that decodes into a newline-separated list of
-//      proxy links (ss://, vmess://, trojan://, ...)
-//   3) A plain-text list of those same proxy links (no Base64 wrapper)
-// countNodes() tries all three and returns the best guess, or 0 if none match.
 // ---------------------------------------------------------------------------
 
 function base64ToString(base64) {
@@ -179,7 +174,6 @@ function countProtocolLinks(text) {
   if (!text) return 0;
   let total = 0;
   for (const protocol of NODE_PROTOCOLS) {
-    // (^|[^A-Za-z]) avoids "ss://" false-matching inside "vmess://" / "vless://".
     const matches = text.match(new RegExp(`(^|[^A-Za-z])${protocol}`, 'g'));
     if (matches) total += matches.length;
   }
@@ -380,6 +374,78 @@ function totalLabel(traffic) {
 
 function nodeCountLabel(data) {
   return Number.isFinite(data.nodeCount) && data.nodeCount > 0 ? `${data.nodeCount} 节点` : '';
+}
+
+// ---------------------------------------------------------------------------
+// Traffic-reset countdown
+// ---------------------------------------------------------------------------
+
+function daysUntilReset(ctx) {
+  const resetDay = Number(ctx.env?.RESET_DAY);
+  if (!Number.isFinite(resetDay) || resetDay < 1 || resetDay > 31) return null;
+
+  const now = new Date();
+  const lastDayOfMonth = (year, month) => new Date(year, month + 1, 0).getDate();
+
+  let year = now.getFullYear();
+  let month = now.getMonth();
+  let targetDay = Math.min(resetDay, lastDayOfMonth(year, month));
+
+  if (now.getDate() > targetDay) {
+    month += 1;
+    if (month > 11) {
+      month = 0;
+      year += 1;
+    }
+    targetDay = Math.min(resetDay, lastDayOfMonth(year, month));
+  }
+
+  const resetDate = new Date(year, month, targetDay);
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  return Math.max(0, Math.round((resetDate.getTime() - today.getTime()) / 86400000));
+}
+
+function resetDaysLabel(ctx) {
+  const days = daysUntilReset(ctx);
+  if (days == null) return '';
+  return days === 0 ? '今日重置' : `重置 ${days}天`;
+}
+
+// 新辅助函数：返回带“流量重置”前缀的标签
+function resetLabelWithPrefix(ctx) {
+  const days = daysUntilReset(ctx);
+  if (days == null) return '';
+  return days === 0 ? '流量重置 今日' : `流量重置 ${days}天`;
+}
+
+function resetDateStr(ctx) {
+  const resetDay = Number(ctx.env?.RESET_DAY);
+  if (!Number.isFinite(resetDay) || resetDay < 1 || resetDay > 31) return null;
+  const now = new Date();
+  const lastDayOfMonth = (year, month) => new Date(year, month + 1, 0).getDate();
+  let year = now.getFullYear();
+  let month = now.getMonth();
+  let targetDay = Math.min(resetDay, lastDayOfMonth(year, month));
+  if (now.getDate() > targetDay) {
+    month += 1;
+    if (month > 11) { month = 0; year += 1; }
+    targetDay = Math.min(resetDay, lastDayOfMonth(year, month));
+  }
+  const resetDate = new Date(year, month, targetDay);
+  return formatDate(resetDate.getTime());
+}
+
+function metricCompact(label, value, width, color = C.text) {
+  return {
+    type: 'stack',
+    direction: 'column',
+    gap: 2,
+    width,
+    children: [
+      text(label, 9, C.dim, 'semibold'),
+      text(value, 12, color, 'semibold', { minScale: 0.68 })
+    ]
+  };
 }
 
 function bytesToBase64(bytes) {
@@ -650,6 +716,7 @@ function nodesOnlyWidget(data, family, ctx) {
                 font: { size: isSmall ? 26 : 32, weight: 'bold', family: 'Menlo' }
               }),
               text('可用节点', 10, C.dim, 'semibold'),
+              ...(resetDaysLabel(ctx) ? [text(resetDaysLabel(ctx), 10, C.accent, 'semibold')] : []),
               text(
                 data.mode === 'stale' ? `流量信息读取失败：${data.error}` : '订阅未提供流量信息',
                 9, C.dim, 'medium', { minScale: 0.6 }
@@ -664,79 +731,9 @@ function nodesOnlyWidget(data, family, ctx) {
   };
 }
 
-function mediumWidget(data, ctx) {
-  if (!data.traffic) {
-    return data.nodeCount > 0 ? nodesOnlyWidget(data, 'systemMedium', ctx) : emptyWidget(data, 'systemMedium', ctx);
-  }
-  const traffic = data.traffic;
-  const days = daysRemaining(traffic.expireAt);
-  const refreshHours = numberEnv(ctx, 'REFRESH_HOURS', 2, 0.5, 24);
-  const daysText = days == null ? '长期' : `${Math.max(0, days)} 天`;
-  const nodes = nodeCountLabel(data);
-
-  return {
-    type: 'widget',
-    backgroundColor: C.bg,
-    padding: [13, 16, 13, 16],
-    gap: 8,
-    refreshAfter: new Date(Date.now() + refreshHours * 3600000).toISOString(),
-    children: [
-      header(data),
-      {
-        type: 'stack',
-        direction: 'row',
-        alignItems: 'start',
-        gap: 12,
-        children: [
-          {
-            type: 'stack',
-            direction: 'column',
-            gap: 5,
-            width: 200,
-            height: 112,
-            children: [
-              leadingLine(text(formatBytes(traffic.remaining), 27, C.text, 'bold', {
-                font: { size: 27, weight: 'bold', family: 'Menlo' },
-                minScale: 0.62
-              }), 200),
-              leadingLine(text('剩余流量', 10, C.dim, 'medium'), 200),
-              {
-                type: 'stack',
-                direction: 'row',
-                alignItems: 'center',
-                width: 200,
-                children: [
-                  text(`已用 ${optionalBytes(traffic.used)}`, 10, C.dim, 'medium', { minScale: 0.72 }),
-                  { type: 'spacer' },
-                  text(`剩余 ${daysText}`, 10, C.dim, 'medium', { minScale: 0.72 })
-                ]
-              },
-              leadingLine(text(
-                nodes ? `到期 ${formatDate(traffic.expireAt)} · ${nodes}` : `到期 ${formatDate(traffic.expireAt)}`,
-                9, C.dim, 'medium', { minScale: 0.65 }
-              ), 200),
-              { type: 'spacer' },
-              leadingLine(text(data.name, 9, C.dim, 'medium', { minScale: 0.7 }), 200)
-            ]
-          },
-          {
-            type: 'stack',
-            direction: 'column',
-            alignItems: 'center',
-            gap: 2,
-            width: 118,
-            height: 112,
-            children: [
-              gaugeView(data, traffic, 100),
-              text(`套餐 ${totalLabel(traffic)}`, 9, C.dim, 'semibold', { minScale: 0.68 })
-            ]
-          }
-        ]
-      }
-    ]
-  };
-}
-
+// ============================================================
+// 小号：底部双排左对齐，标签为“套餐到期”和“流量重置”
+// ============================================================
 function smallWidget(data, ctx) {
   if (!data.traffic) {
     return data.nodeCount > 0 ? nodesOnlyWidget(data, 'systemSmall', ctx) : emptyWidget(data, 'systemSmall', ctx);
@@ -744,7 +741,9 @@ function smallWidget(data, ctx) {
   const traffic = data.traffic;
   const percent = percentRemaining(traffic);
   const refreshHours = numberEnv(ctx, 'REFRESH_HOURS', 2, 0.5, 24);
-  const nodes = nodeCountLabel(data);
+  const expireLine = `套餐到期 ${formatDate(traffic.expireAt)}`;
+  const resetLine = resetLabelWithPrefix(ctx);
+
   return {
     type: 'widget',
     backgroundColor: C.bg,
@@ -769,11 +768,116 @@ function smallWidget(data, ctx) {
       },
       progressOrNote(traffic, 126),
       { type: 'spacer' },
-      text(nodes ? `${formatDate(traffic.expireAt)} · ${nodes}` : formatDate(traffic.expireAt), 9, C.dim, 'medium')
+      {
+        type: 'stack',
+        direction: 'column',
+        gap: 2,
+        alignItems: 'start',  // 左对齐
+        children: [
+          text(expireLine, 9, C.dim, 'medium', { minScale: 0.6 }),
+          ...(resetLine ? [text(resetLine, 9, C.dim, 'medium', { minScale: 0.6 })] : [])
+        ]
+      }
     ]
   };
 }
 
+// ============================================================
+// 中号：数字调大（28），水平居中，左侧“套餐到期”与“已用”同排
+// ============================================================
+function mediumWidget(data, ctx) {
+  if (!data.traffic) {
+    return data.nodeCount > 0 ? nodesOnlyWidget(data, 'systemMedium', ctx) : emptyWidget(data, 'systemMedium', ctx);
+  }
+  const traffic = data.traffic;
+  const days = daysRemaining(traffic.expireAt);
+  const refreshHours = numberEnv(ctx, 'REFRESH_HOURS', 2, 0.5, 24);
+  const daysText = days == null ? '长期' : `${Math.max(0, days)} 天`;
+
+  // 额外信息行（流量重置、节点数量）
+  const extraLines = [
+    resetLabelWithPrefix(ctx) ? resetLabelWithPrefix(ctx) : null,
+    data.nodeCount > 0 ? `节点数量 ${data.nodeCount} 个` : null
+  ].filter(Boolean);
+
+  return {
+    type: 'widget',
+    backgroundColor: C.bg,
+    padding: [13, 16, 13, 16],
+    gap: 8,
+    refreshAfter: new Date(Date.now() + refreshHours * 3600000).toISOString(),
+    children: [
+      header(data),
+      {
+        type: 'stack',
+        direction: 'row',
+        alignItems: 'start',
+        gap: 12,
+        children: [
+          {
+            type: 'stack',
+            direction: 'column',
+            gap: 5,
+            width: 200,
+            height: 112,
+            children: [
+              // 顶部 spacer 让下方内容稍微居中（视觉上数字靠上一些更突出）
+              { type: 'spacer' },
+              // 大数字 + “剩余流量” 水平居中
+              {
+                type: 'stack',
+                direction: 'column',
+                alignItems: 'center',
+                children: [
+                  text(formatBytes(traffic.remaining), 28, C.text, 'bold', {
+                    font: { size: 28, weight: 'bold', family: 'Menlo' },
+                    minScale: 0.62,
+                    textAlign: 'center'
+                  }),
+                  text('剩余流量', 10, C.dim, 'medium', { textAlign: 'center' })
+                ]
+              },
+              // 已用 和 套餐到期（左右排列）
+              {
+                type: 'stack',
+                direction: 'row',
+                alignItems: 'center',
+                width: 200,
+                children: [
+                  text(`套餐到期 ${daysText}`, 10, C.dim, 'medium', { minScale: 0.72 }),
+                  { type: 'spacer' },
+                  text(`已用 ${optionalBytes(traffic.used)}`, 10, C.dim, 'medium', { minScale: 0.72 })
+                ]
+              },
+              // 额外行（流量重置、节点数量）
+              ...extraLines.map(line =>
+                leadingLine(text(line, 8, C.dim, 'medium', { minScale: 0.5 }), 200)
+              ),
+              { type: 'spacer' },
+              leadingLine(text(data.name, 9, C.dim, 'medium', { minScale: 0.7 }), 200)
+            ]
+          },
+          {
+            type: 'stack',
+            direction: 'column',
+            alignItems: 'center',
+            gap: 2,
+            width: 118,
+            height: 112,
+            children: [
+              gaugeView(data, traffic, 100),
+              text(`套餐 ${totalLabel(traffic)}`, 9, C.dim, 'semibold', { minScale: 0.68 })
+            ]
+          }
+        ]
+      }
+    ]
+  };
+}
+
+// ============================================================
+// 大号：去掉“剩余流量”文字，数字加大至30，右下角显示“套餐到期 …（剩余N天）”
+// ============================================================
 function largeWidget(data, ctx) {
   if (!data.traffic) {
     return data.nodeCount > 0 ? nodesOnlyWidget(data, 'systemLarge', ctx) : emptyWidget(data, 'systemLarge', ctx);
@@ -783,6 +887,23 @@ function largeWidget(data, ctx) {
   const days = daysRemaining(traffic.expireAt);
   const refreshHours = numberEnv(ctx, 'REFRESH_HOURS', 2, 0.5, 24);
   const daily = days && days > 0 && Number.isFinite(traffic.remaining) ? traffic.remaining / days : null;
+  const remainDays = days == null ? '长期' : `${Math.max(0, days)} 天`;
+
+  // 重置日期、流量重置、节点数量三列
+  const resetDate = resetDateStr(ctx);
+  const resetRemain = daysUntilReset(ctx);
+  const nodeCount = data.nodeCount > 0 ? `${data.nodeCount} 个` : '--';
+
+  const extraRow = (resetDate || resetRemain != null || data.nodeCount > 0) ? [{
+    type: 'stack',
+    direction: 'row',
+    gap: 12,
+    children: [
+      { type: 'stack', flex: 1, children: [metricCompact('重置日期', resetDate || '--', undefined, C.accent)] },
+      { type: 'stack', flex: 1, children: [metricCompact('流量重置', resetRemain == null ? '--' : (resetRemain === 0 ? '今日' : `${resetRemain} 天`), undefined, C.accent)] },
+      { type: 'stack', flex: 1, children: [metricCompact('节点数量', nodeCount, undefined, C.accent)] }
+    ]
+  }] : [];
 
   return {
     type: 'widget',
@@ -808,10 +929,12 @@ function largeWidget(data, ctx) {
             gap: 2,
             flex: 1,
             children: [
-              text(formatBytes(traffic.remaining), 22, C.text, 'bold', {
-                font: { size: 22, weight: 'bold', family: 'Menlo' }, minScale: 0.6
-              }),
-              text('剩余流量', 10, C.dim, 'medium')
+              // 去掉“剩余流量”文字，只保留数字（加大至30）
+              text(formatBytes(traffic.remaining), 30, C.text, 'bold', {
+                font: { size: 30, weight: 'bold', family: 'Menlo' },
+                minScale: 0.6
+              })
+              // 不再显示“剩余流量”标签
             ]
           },
           text(traffic.unlimited ? '∞' : percent == null ? '--' : `${percent.toFixed(0)}%`, 18, C.text, 'bold')
@@ -835,18 +958,19 @@ function largeWidget(data, ctx) {
         gap: 12,
         children: [
           metric('套餐总量', totalLabel(traffic)),
-          metric('节点数', data.nodeCount > 0 ? `${data.nodeCount} 个` : '--'),
-          metric('剩余天数', days == null ? '长期' : `${Math.max(0, days)} 天`),
+          metric('套餐到期', remainDays),
           metric('日均可用', daily == null ? '--' : formatBytes(daily))
         ]
       },
+      ...extraRow,
       { type: 'spacer' },
       {
         type: 'stack',
         direction: 'row',
         children: [
           text(data.name, 9, C.dim, 'medium', { flex: 1, minScale: 0.7 }),
-          text(`到期 ${formatDate(traffic.expireAt)}`, 9, C.dim, 'semibold')
+          // 右下角显示“套餐到期 YYYY-MM-DD (剩余N天)”
+          text(`套餐到期 ${formatDate(traffic.expireAt)} (剩余${remainDays})`, 9, C.dim, 'semibold')
         ]
       }
     ]
