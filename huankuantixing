@@ -1,3 +1,6 @@
+// 还款提醒小组件 - 纯显示版
+// 中号显示3张，大号显示6张
+
 const C = {
   bg: { light: '#F2F4F8', dark: '#0C0C14' },
   card: { light: '#FFFFFF', dark: '#16161F' },
@@ -163,7 +166,6 @@ function mediumWidget(allCards, now) {
     const label = dueLabel(remaining, isPassed);
     const daysToStatement = daysBetween(now, card.data.nextStatement);
     
-    // 边框统一透明，内容按重要程度显示
     return {
       type: 'stack',
       direction: 'column',
@@ -185,7 +187,6 @@ function mediumWidget(allCards, now) {
             txt(card.shortName, 10, 'bold', C.black),
             { type: 'spacer' },
             txt(`··${card.tail}`, 7, 'medium', C.sub),
-            // 标签根据重要程度显示不同颜色
             {
               type: 'stack',
               padding: [1, 6],
@@ -297,7 +298,6 @@ function largeWidget(allCards, now) {
     const label = dueLabel(remaining, isPassed);
     const daysToStatement = daysBetween(now, card.data.nextStatement);
     
-    // 边框统一透明，内容按重要程度显示
     return {
       type: 'stack',
       direction: 'column',
@@ -424,11 +424,6 @@ export default async function(ctx) {
     { name: '中信银行', shortName: '中信', tail: '6165', data: getNextDueDate(now, 14, 3, 1) },
     { name: '民生银行', shortName: '民生', tail: '2826', data: getNextDueDate(now, 25, 14, 1) },
   ];
-
-  console.log('===== 还款提醒 =====');
-  cards.forEach(c => {
-    console.log(`${c.name}: 还款日 ${dateLabel(c.data.due)}, 剩余 ${c.data.remaining} 天, 出账日 ${dateLabel(c.data.nextStatement)}`);
-  });
 
   // 小尺寸
   if (ctx.widgetFamily === 'accessoryInline') {
